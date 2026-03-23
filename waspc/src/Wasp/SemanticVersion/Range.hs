@@ -21,20 +21,25 @@ module Wasp.SemanticVersion.Range
 where
 
 import Control.Monad (guard, void)
-import Data.List (intercalate, nub)
+import Data.List (intercalate)
 import qualified Data.List.NonEmpty as NE
 import Data.Maybe (isJust)
 import qualified Language.Haskell.TH.Quote as TH
 import qualified Language.Haskell.TH.Syntax as TH
 import qualified Text.Parsec as P
-import Wasp.SemanticVersion.Comparator (Comparator (..), PrimitiveOperator (..))
-import Wasp.SemanticVersion.ComparatorSet (ComparatorSet (..), SimpleRangeExpression (..), comparatorSetParser)
-import Wasp.SemanticVersion.PartialVersion (PartialVersion (..), fromVersion)
-import Wasp.SemanticVersion.Version (Version (..), nextBreakingChangeVersion)
+import Wasp.SemanticVersion.PartialVersion (versionToPartialVersion)
+import Wasp.SemanticVersion.RangeExpression
+  ( PrimitiveOperator (..),
+    RangeExpression (..),
+    SimpleRangeExpression (..),
+  )
+import Wasp.SemanticVersion.Version
+  ( Version (..),
+    nextBreakingChangeVersion,
+  )
 import Wasp.SemanticVersion.VersionBound
   ( HasVersionBounds (versionBounds),
     VersionBound (..),
-    allVersionsInterval,
     intervalUnion,
     isSubintervalOf,
     isVersionInInterval,
@@ -44,28 +49,24 @@ import Wasp.Util.TH (quasiQuoterFromParser)
 
 -- | Comparator sets can be joined by "||" to form a range,
 -- which is satisfied by satisfying any of the comparator sets it includes.
-data Range = Range [ComparatorSet]
+data Range = Range (NE.NonEmpty RangeExpression)
   deriving (Eq, TH.Lift)
 
 -- | We rely on this 'show' implementation to produce valid `node-semver` range.
 instance Show Range where
-  show (Range compSets) = intercalate " || " $ show <$> compSets
+  show (Range rangeExpressions) = intercalate " || " (show <$> NE.toList rangeExpressions)
 
 -- | We define concatenation of two version ranges as a union of their comparator sets.
 instance Semigroup Range where
-  (Range csets1) <> (Range csets2) = Range $ nub $ csets1 <> csets2
-
-instance Monoid Range where
-  mempty = Range []
+  (Range csets1) <> (Range csets2) = Range $ NE.nub $ csets1 <> csets2
 
 instance HasVersionBounds Range where
-  versionBounds (Range []) = allVersionsInterval
   versionBounds (Range compSets) = foldr1 intervalUnion $ versionBounds <$> compSets
 
 isVersionInRange :: Version -> Range -> Bool
 isVersionInRange version (Range compSets) = any (doesVersionSatisfyComparatorSet version) compSets
 
-doesVersionSatisfyComparatorSet :: Version -> ComparatorSet -> Bool
+doesVersionSatisfyComparatorSet :: Version -> RangeExpression -> Bool
 doesVersionSatisfyComparatorSet version compSet =
   isVersionInInterval (versionBounds compSet) version
 
@@ -83,37 +84,37 @@ doesVersionRangeAllowMajorChanges = not . doesVersionRangeAllowOnlyMinorChanges
 -- Helper methods for constructing a 'Range'.
 
 caretRange :: Version -> Range
-caretRange = Range . pure . SimpleComparatorSet . NE.fromList . pure . CaretRange . fromVersion
+caretRange = Range . pure . Simple . NE.fromList . pure . CaretRange . versionToPartialVersion
 
 backwardsCompatibleWith :: Version -> Range
 backwardsCompatibleWith = caretRange
 
 tildeRange :: Version -> Range
-tildeRange = Range . pure . SimpleComparatorSet . NE.fromList . pure . TildeRange . fromVersion
+tildeRange = Range . pure . Simple . NE.fromList . pure . TildeRange . versionToPartialVersion
 
 approximatelyEquivalentTo :: Version -> Range
 approximatelyEquivalentTo = tildeRange
 
 hyphenRange :: Version -> Version -> Range
-hyphenRange v1 v2 = Range [HyphenRange (fromVersion v1) (fromVersion v2)]
+hyphenRange v1 v2 = Range $ NE.fromList [HyphenRange (versionToPartialVersion v1) (versionToPartialVersion v2)]
 
 lt :: Version -> Range
-lt = mkComparatorRange LessThan
+lt = mkPrimtiive LessThan
 
 lte :: Version -> Range
-lte = mkComparatorRange LessThanOrEqual
+lte = mkPrimtiive LessThanOrEqual
 
 gt :: Version -> Range
-gt = mkComparatorRange GreaterThan
+gt = mkPrimtiive GreaterThan
 
 gte :: Version -> Range
-gte = mkComparatorRange GreaterThanOrEqual
+gte = mkPrimtiive GreaterThanOrEqual
 
 eq :: Version -> Range
-eq = mkComparatorRange Equal
+eq = mkPrimtiive Equal
 
-mkComparatorRange :: PrimitiveOperator -> Version -> Range
-mkComparatorRange op = Range . pure . SimpleComparatorSet . NE.fromList . pure . Primitive . Comparator op . fromVersion
+mkPrimtiive :: PrimitiveOperator -> Version -> Range
+mkPrimtiive primOp = Range . pure . Simple . NE.fromList . pure . Primitive primOp . versionToPartialVersion
 
 r :: TH.QuasiQuoter
 r = quasiQuoterFromParser parseRange
@@ -126,18 +127,14 @@ parseRange = P.parse (rangeParser <* P.eof) ""
 rangeParser :: P.Parsec String () Range
 rangeParser = Range <$> rangeSetParser
   where
-    rangeSetParser :: P.Parsec String () [ComparatorSet]
+    rangeSetParser :: P.Parsec String () (NE.NonEmpty RangeExpression)
     rangeSetParser = do
-      first <- rangeExpressionParser
-      rest <- P.many $ P.try (logicalOrParser *> rangeExpressionParser)
-      pure (first : rest)
+      first <- rangeSetItemParser
+      rest <- P.many $ P.try (logicalOrParser *> rangeSetItemParser)
+      pure $ NE.fromList (first : rest)
 
-    rangeExpressionParser :: P.Parsec String () ComparatorSet
-    rangeExpressionParser = P.spaces *> (comparatorSetParser P.<|> emptyRangeParser) <* P.spaces
-
-    -- `node-semver` parses empty input as the equals any comparator (*).
-    emptyRangeParser :: P.Parsec String () ComparatorSet
-    emptyRangeParser = (SimpleComparatorSet . pure . Primitive $ Comparator Equal Any) <$ P.eof
+    rangeSetItemParser :: P.Parsec String () RangeExpression
+    rangeSetItemParser = P.spaces *> rangeSetItemParser <* P.spaces
 
     logicalOrParser :: P.Parsec String () ()
     logicalOrParser = void (P.spaces *> P.string "||" <* P.spaces)

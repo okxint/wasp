@@ -445,8 +445,7 @@ library
     Wasp.Psl.Util
     Wasp.Psl.Valid
     Wasp.SemanticVersion
-    Wasp.SemanticVersion.Comparator
-    Wasp.SemanticVersion.ComparatorSet
+    Wasp.SemanticVersion.RangeExpression
     Wasp.SemanticVersion.Parsers
     Wasp.SemanticVersion.PartialVersion
     Wasp.SemanticVersion.Range
@@ -741,8 +740,7 @@ test-suite waspc-tests
     Psl.Parser.ViewTest
     Psl.Parser.WithCtxTest
     Psl.ValidTest
-    SemanticVersion.ComparatorSetTest
-    SemanticVersion.ComparatorTest
+    SemanticVersion.RangeExpressionTest
     SemanticVersion.ParsersTest
     SemanticVersion.PartialVersionTest
     SemanticVersion.RangeTest
